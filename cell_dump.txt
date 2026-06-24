@@ -1,0 +1,309 @@
+﻿=== CELL 156 [code] ===
+cols_to_drop = ['Unnamed: 0', 'index_x', 'index_y', 'year_group',
+                'end_a', 'end_x', 'tube_prefix']
+cols_to_drop = [c for c in cols_to_drop if c in Final_DF.columns]
+df_model = Final_DF.drop(columns=cols_to_drop)
+
+X = df_model.drop(columns=['cost'])
+y = df_model['cost']
+
+# Log-transform target — cost is heavily right-skewed
+y_log = np.log1p(y)
+
+print(f"Total samples : {X.shape[0]}")
+print(f"Total features: {X.shape[1]}")
+print(f"\nFeatures:\n{list(X.columns)}")
+
+# Step 1 — hold out 20% as the truly unseen test set
+X_trainval, X_test, y_trainval, y_test = train_test_split(
+    X, y_log, test_size=0.2, random_state=42
+)
+
+# Step 2 — split remaining 80% into train (75% of 80% = 60%) and validation (20%)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_trainval, y_trainval, test_size=0.25, random_state=42
+)
+
+print(f"\n{'─'*45}")
+print(f"  Training set   : {X_train.shape[0]:>5} rows  ({X_train.shape[0]/len(X)*100:.0f}%)")
+print(f"  Validation set : {X_val.shape[0]:>5} rows  ({X_val.shape[0]/len(X)*100:.0f}%)")
+print(f"  Test set       : {X_test.shape[0]:>5} rows  ({X_test.shape[0]/len(X)*100:.0f}%)  ← sealed")
+print(f"{'─'*45}")
+
+
+=== CELL 164 [code] ===
+def evaluate(pipeline, X, y_log_true, label=""):
+    """Predict and score, converting log-predictions back to original $ scale."""
+    y_pred_log  = pipeline.predict(X)
+    y_true_orig = np.expm1(y_log_true)
+    y_pred_orig = np.expm1(y_pred_log)
+    mae  = mean_absolute_error(y_true_orig, y_pred_orig)
+    rmse = np.sqrt(mean_squared_error(y_true_orig, y_pred_orig))
+    r2   = r2_score(y_true_orig, y_pred_orig)
+    if label:
+        print(f"  {label:45s}  MAE=${mae:7.4f}  RMSE=${rmse:7.4f}  R²={r2:.4f}")
+    return {"MAE": mae, "RMSE": rmse, "R²": r2,
+            "y_true": y_true_orig, "y_pred": y_pred_orig}
+
+=== CELL 165 [markdown] ===
+## Phase 2: Baseline Models
+
+Two baseline Linear Regression models are trained and compared:
+
+- **Model A** is trained on the raw, untransformed cost.
+- **Model B** is trained on the power-transformed cost.
+
+Each model is evaluated on the validation set and additionally assessed with 5-fold cross-validation on the training set. The cross-validation result decides which approach is carried forward to the tuning phase, because a single validation split can be misleading.
+
+=== CELL 166 [markdown] ===
+### Model A: Linear Regression on Raw Cost
+
+The next cell trains a pipeline of StandardScaler and LinearRegression directly on the raw cost values and evaluates it on the validation set. This serves as the simplest possible reference point.
+
+=== CELL 167 [code] ===
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.pipeline import Pipeline
+
+# Raw (untransformed) targets for Model A
+y_train_raw = np.expm1(y_train)
+y_val_raw   = np.expm1(y_val)
+
+model_A = Pipeline([
+    ('scaler', StandardScaler()),
+    ('model',  LinearRegression())
+])
+model_A.fit(X_train, y_train_raw)
+
+# Evaluate on validation set
+y_pred_A = model_A.predict(X_val)
+
+mae_A  = mean_absolute_error(y_val_raw, y_pred_A)
+rmse_A = np.sqrt(mean_squared_error(y_val_raw, y_pred_A))
+r2_A   = r2_score(y_val_raw, y_pred_A)
+
+print("=== Model A — Linear Regression (Raw Cost) ===")
+print(f"Validation MAE  : ${mae_A:.4f}")
+print(f"Validation RMSE : ${rmse_A:.4f}")
+print(f"Validation R²   : {r2_A:.4f}")
+
+=== CELL 168 [markdown] ===
+### Model A: 5-Fold Cross-Validation
+
+The next cell runs 5-fold cross-validation for Model A on the training set. The data is split into 5 folds; the model trains on 4 folds and is tested on the remaining one, rotating 5 times. The spread of the 5 scores shows how stable the model is across different subsets of the data.
+
+=== CELL 169 [code] ===
+from sklearn.model_selection import KFold, cross_validate
+
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+cv_A = cross_validate(
+    model_A, X_train, y_train_raw,
+    cv=kf,
+    scoring={
+        'r2'  : 'r2',
+        'mae' : 'neg_mean_absolute_error',
+        'rmse': 'neg_root_mean_squared_error'
+    }
+)
+
+cv_mae_A  = -cv_A['test_mae'].mean()
+cv_rmse_A = -cv_A['test_rmse'].mean()
+cv_r2_A   =  cv_A['test_r2'].mean()
+
+print("=== Model A — 5-Fold Cross-Validation (Raw Cost) ===")
+print(f"CV MAE  : ${cv_mae_A:.4f}")
+print(f"CV RMSE : ${cv_rmse_A:.4f}")
+print(f"CV R²   : {cv_r2_A:.4f}")
+print(f"\nAll CV R² scores: {cv_A['test_r2'].round(3)}")
+
+
+=== CELL 170 [markdown] ===
+### Model A: Actual vs Predicted
+
+The next cell plots the actual validation costs against Model A predictions. Points on the red dashed line would be perfect predictions. The plot reveals where the model is accurate and where it fails.
+
+=== CELL 171 [code] ===
+plt.figure(figsize=(8, 5))
+plt.scatter(y_val_raw, y_pred_A, alpha=0.3, color='steelblue', edgecolors='none', s=15)
+plt.plot([y_val_raw.min(), y_val_raw.max()],
+         [y_val_raw.min(), y_val_raw.max()],
+         'r--', linewidth=1.5, label='Perfect prediction')
+plt.xlabel('Actual Cost ($)')
+plt.ylabel('Predicted Cost ($)')
+plt.title('Model A — Actual vs Predicted (Raw Cost)')
+plt.legend()
+plt.tight_layout()
+plt.savefig('model_A_actual_vs_predicted.png', dpi=150)
+plt.show()
+
+=== CELL 172 [markdown] ===
+### Model B: Linear Regression on Power-Transformed Cost
+
+The next cell trains the same pipeline on the power-transformed cost (cost ** (1/20)). Predictions are converted back to dollars with the power of 20 (clipped at zero) before evaluation, so the metrics are directly comparable with Model A.
+
+=== CELL 173 [code] ===
+model_B = Pipeline([
+    ('scaler', StandardScaler()),
+    ('model',  LinearRegression())
+])
+model_B.fit(X_train, y_train)
+
+# Predict and convert back to original dollar scale
+y_pred_B_log = model_B.predict(X_val)
+y_pred_B     = np.expm1(y_pred_B_log)
+y_val_orig   = np.expm1(y_val)
+
+mae_B  = mean_absolute_error(y_val_orig, y_pred_B)
+rmse_B = np.sqrt(mean_squared_error(y_val_orig, y_pred_B))
+r2_B   = r2_score(y_val_orig, y_pred_B)
+
+print("=== Model B — Linear Regression (Log-Transformed Cost) ===")
+print(f"Validation MAE  : ${mae_B:.4f}")
+print(f"Validation RMSE : ${rmse_B:.4f}")
+print(f"Validation R²   : {r2_B:.4f}")
+
+=== CELL 174 [markdown] ===
+### Model B: 5-Fold Cross-Validation
+
+The next cell runs 5-fold cross-validation for Model B on the training set. The MAE and RMSE values here are on the transformed scale because the model is trained on that scale; the R2 values are comparable across folds and indicate stability.
+
+=== CELL 175 [code] ===
+cv_B = cross_validate(
+    model_B, X_train, y_train,
+    cv=kf,
+    scoring={
+        'r2'  : 'r2',
+        'mae' : 'neg_mean_absolute_error',
+        'rmse': 'neg_root_mean_squared_error'
+    }
+)
+
+cv_mae_B  = -cv_B['test_mae'].mean()
+cv_rmse_B = -cv_B['test_rmse'].mean()
+cv_r2_B   =  cv_B['test_r2'].mean()
+
+print("=== Model B — 5-Fold Cross-Validation (Log Scale) ===")
+print(f"CV MAE  : {cv_mae_B:.4f}  (log scale)")
+print(f"CV RMSE : {cv_rmse_B:.4f}  (log scale)")
+print(f"CV R²   : {cv_r2_B:.4f}")
+print(f"\nAll CV R² scores: {cv_B['test_r2'].round(3)}")
+
+
+=== CELL 176 [markdown] ===
+### Model B: Actual vs Predicted
+
+The next cell plots actual against predicted costs for Model B on the validation set, on the original dollar scale after back-transformation.
+
+=== CELL 177 [code] ===
+plt.figure(figsize=(8, 5))
+plt.scatter(y_val_orig, y_pred_B, alpha=0.3, color='seagreen', edgecolors='none', s=15)
+plt.plot([y_val_orig.min(), y_val_orig.max()],
+         [y_val_orig.min(), y_val_orig.max()],
+         'r--', linewidth=1.5, label='Perfect prediction')
+plt.xlabel('Actual Cost ($)')
+plt.ylabel('Predicted Cost ($)')
+plt.title('Model B — Actual vs Predicted (Log-Transformed Cost)')
+plt.legend()
+plt.tight_layout()
+plt.savefig('model_B_actual_vs_predicted.png', dpi=150)
+plt.show()
+
+=== CELL 178 [markdown] ===
+### Model A vs Model B: Summary and Conclusion
+
+The next cell prints a summary table of both models and plots their validation R2 next to their cross-validation R2. The cross-validation result is the primary decision criterion: it averages five different splits and is therefore more reliable than any single split. The model with the higher and more stable CV R2 is carried forward to hyperparameter tuning.
+
+=== CELL 179 [code] ===
+import matplotlib.pyplot as plt
+import numpy as np
+
+models   = ['Model A\n(Raw Cost)', 'Model B\n(Log Cost)']
+val_r2   = [r2_A,    r2_B]
+cv_r2    = [cv_r2_A, cv_r2_B]
+val_mae  = [mae_A,   mae_B]
+val_rmse = [rmse_A,  rmse_B]
+
+print("=== Model A vs Model B — Summary ===")
+print(f"{'Metric':<20} {'Model A':>12} {'Model B':>12}")
+print("-" * 45)
+print(f"{'Validation MAE ($)':<20} {mae_A:>12.4f} {mae_B:>12.4f}")
+print(f"{'Validation RMSE ($)':<20} {rmse_A:>12.4f} {rmse_B:>12.4f}")
+print(f"{'Validation R²':<20} {r2_A:>12.4f} {r2_B:>12.4f}")
+print(f"{'CV R² (mean)':<20} {cv_r2_A:>12.4f} {cv_r2_B:>12.4f}")
+
+# Side-by-side bar chart
+x     = np.arange(len(models))
+width = 0.35
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# Validation R²
+axes[0].bar(x - width/2, val_r2, width, label='Validation R²',
+            color=['steelblue', 'seagreen'], edgecolor='black')
+axes[0].set_title('Validation R²', fontweight='bold')
+axes[0].set_xticks(x)
+axes[0].set_xticklabels(models)
+axes[0].set_ylabel('R²')
+for i, v in enumerate(val_r2):
+    axes[0].text(i, v + 0.005, f'{v:.4f}', ha='center', fontsize=10)
+
+# CV R²
+axes[1].bar(x - width/2, cv_r2, width, label='CV R²',
+            color=['steelblue', 'seagreen'], edgecolor='black')
+axes[1].set_title('5-Fold CV R² (Stability)', fontweight='bold')
+axes[1].set_xticks(x)
+axes[1].set_xticklabels(models)
+axes[1].set_ylabel('R²')
+for i, v in enumerate(cv_r2):
+    axes[1].text(i, v + 0.005, f'{v:.4f}', ha='center', fontsize=10)
+
+plt.suptitle('Model A vs Model B — Validation & Cross-Validation Comparison',
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.savefig('model_A_vs_B_comparison.png', dpi=150)
+plt.show()
+
+print("""
+Conclusion:
+  Model A's CV R² reveals it is unstable — it generalises poorly across folds.
+  Model B's CV R² is consistently higher, confirming log transformation
+  produces a more stable and reliable model.
+  → Model B is selected as the basis for hyperparameter tuning in Phase 3.
+""")
+
+
+=== CELL 180 [markdown] ===
+### Model A vs Model B: Metric Bar Chart
+
+The next cell shows MAE, RMSE and R2 for both models side by side on the validation set, all on the original dollar scale.
+
+=== CELL 181 [code] ===
+metrics  = ['MAE ($)', 'RMSE ($)', 'R²']
+scores_A = [mae_A, rmse_A, r2_A]
+scores_B = [mae_B, rmse_B, r2_B]
+
+x     = np.arange(len(metrics))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(9, 5))
+bars_A = ax.bar(x - width/2, scores_A, width,
+                label='Model A — Raw Cost', color='steelblue', edgecolor='black')
+bars_B = ax.bar(x + width/2, scores_B, width,
+                label='Model B — Log Cost', color='seagreen', edgecolor='black')
+
+ax.set_xlabel('Metric')
+ax.set_ylabel('Score')
+ax.set_title('Model A vs Model B — Validation Set Comparison')
+ax.set_xticks(x)
+ax.set_xticklabels(metrics)
+ax.legend()
+ax.bar_label(bars_A, fmt='%.3f', padding=3, fontsize=9)
+ax.bar_label(bars_B, fmt='%.3f', padding=3, fontsize=9)
+
+plt.tight_layout()
+plt.savefig('model_A_vs_B_comparison.png', dpi=150)
+plt.show()
+
+

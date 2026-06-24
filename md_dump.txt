@@ -1,0 +1,207 @@
+﻿=== CELL 0 id=db677029 ===
+# Supply Chain Management
+
+=== CELL 1 id=61b21300 ===
+# Linear Regression and KNN Regression By Chinelo Lydia Nweke
+
+=== CELL 2 id=6799a517 ===
+## 1.0 Import Libraries
+
+=== CELL 3 id=4e7aa62b ===
+In this section, we import all the libraries needed for the full modelling pipeline. This includes data manipulation tools, visualisation libraries, machine learning algorithms, and evaluation metrics. Importing everything at the start keeps the notebook organised and makes it easy to confirm all dependencies are available before running any analysis.
+
+=== CELL 5 id=dab013a3 ===
+## 1.1 Load Data
+
+=== CELL 6 id=5b5ae8b0 ===
+The final cleaned and feature-engineered dataset is loaded here. This file already contains the merged tube assembly data and the power-transformed target variable `cost_transformed`, so modelling can begin without repeating any of the earlier data preparation steps.
+
+=== CELL 8 id=77724e49 ===
+**Insight:** The dataset contains 30,213 rows and 49 columns, reflecting the full set of features produced after merging and engineering the tube assembly data. There are no missing values, confirming that all nulls were handled during data preparation. The `cost_transformed` column is the power-transformed version of supplier quote cost, computed as `cost ** (1/20)` to reduce the effect of extreme high-cost outliers during model training. Not all 49 columns will be used for modelling — the feature selection step below narrows this down to the 7 most relevant variables.
+
+=== CELL 9 id=163897b6 ===
+## 1.2 Feature Analysis Before Modelling
+
+=== CELL 10 id=6e9242ed ===
+Before selecting features, I run two statistical tests across all available numeric columns to find out which ones actually matter for predicting cost. F-regression measures the linear association between each feature and the target by computing an F-statistic and p-value. A higher F-score means a stronger linear relationship. Mutual Information captures both linear and non-linear associations, making it a useful complement. Running both tests on all columns lets the data decide which features are worth keeping, rather than making that choice manually without evidence.
+
+=== CELL 13 id=03f62a65 ===
+**Insight:** Both methods consistently rank `Total_weight`, `diameter`, and `length` among the highest scoring features. These reflect the physical size and material mass of the tube assembly, which directly drives manufacturing complexity and material cost. Features such as `annual_usage`, `min_order_quantity`, `bracket_pricing`, and `wall` also appear in the top results across both methods. Features with very low F-scores and low Mutual Information scores contribute little predictive value and are excluded. The seven features selected in the next section are those that ranked consistently well across both tests.
+
+=== CELL 14 id=28f10f51 ===
+## 1.3 Feature Selection
+
+=== CELL 15 id=c5190175 ===
+Based on the F-regression and Mutual Information analysis above, seven features are selected as model inputs. All seven are statistically significant and collectively represent the physical properties of the tube assembly and the commercial context of the order. The target variable is `cost_transformed`, which is the power-transformed cost computed as `cost ** (1/20)` to reduce the skewness of the original price distribution before modelling.
+
+=== CELL 17 id=faa440fc ===
+**Insight:** The feature matrix X contains 30,213 observations across 7 features, and the target vector y holds the corresponding power-transformed cost values. The descriptive statistics confirm that features vary significantly in scale, for example `annual_usage` reaches values in the thousands while `wall` is measured in small decimal fractions. This difference in scale is the reason we apply `StandardScaler` inside every model pipeline, so that no single feature dominates purely due to its unit of measurement.
+
+=== CELL 18 id=cfb83056 ===
+## 2. Linear Regression
+
+This section applies Linear Regression to predict supplier quote cost. The pipeline follows six structured phases: data splitting, baseline modelling, hyperparameter tuning, validation, final test evaluation, and explainability. Two baseline variants are compared first so the choice of target scale is backed by evidence, not assumption.
+
+=== CELL 19 id=567b7c7c ===
+### Phase 1: 3-Way Data Split
+
+Before any model is trained, the data is divided into three non-overlapping sets. The training set (60%) is used to fit the model. The validation set (20%) is used to compare tuning choices. The test set (20%) is sealed immediately and is not used for any decision until Phase 5, ensuring the final reported performance reflects true generalisation.
+
+=== CELL 21 id=d9d8e4d4 ===
+**Insight:** With 30,213 samples the training set contains approximately 18,127 rows, the validation set 6,043 rows, and the test set 6,043 rows. Each partition is large enough for reliable metric estimation. Setting `random_state=42` ensures the split is reproducible.
+
+=== CELL 22 id=e6a5fc09 ===
+### Helper Function: Evaluation on the Original Dollar Scale
+
+All models are trained on the power-transformed target (`cost ** (1/20)`). To report metrics that are meaningful in business terms, predictions must be converted back to the original dollar scale before computing MAE, RMSE, and R2. The `evaluate` function below handles this back-transformation for any pipeline passed to it.
+
+=== CELL 24 id=35842f73 ===
+### Phase 2: Baseline Models
+
+Two baseline Linear Regression models are trained and compared:
+
+- **Model A** is trained on the raw, untransformed cost values.
+- **Model B** is trained on the power-transformed cost (`cost_transformed = cost ** (1/20)`).
+
+Each model is evaluated on the validation set and with 5-fold cross-validation on the training set. Cross-validation averages performance across five different subsets of the training data, giving a more reliable stability measure than any single validation split. The model with the higher and more consistent CV R2 is selected for hyperparameter tuning.
+
+=== CELL 25 id=7603b264 ===
+#### Model A: Linear Regression on Raw Cost
+
+Model A uses a `StandardScaler + LinearRegression` pipeline trained directly on the untransformed cost values. This is the simplest possible baseline with no transformation and no regularisation.
+
+=== CELL 27 id=ae0922f1 ===
+#### Model A: 5-Fold Cross-Validation
+
+The training set is divided into 5 folds. The model trains on 4 folds and is evaluated on the remaining one, rotating 5 times. The spread of R2 scores across folds shows how stable Model A is when the training data changes.
+
+=== CELL 30 id=3217ea44 ===
+**Insight:** Model A on raw cost is sensitive to outliers because the untransformed target amplifies extreme values during training. The actual vs predicted plot typically shows the model underestimating high-cost assemblies. The CV R2 spread across folds reveals how much the model varies depending on which data it sees.
+
+=== CELL 31 id=2f2fb1c4 ===
+#### Model B: Linear Regression on Power-Transformed Cost
+
+Model B uses the same pipeline but is trained on `cost_transformed` (cost ** (1/20)). The power transformation compresses the right tail of the cost distribution, which reduces the influence of extreme values and stabilises the regression. Predictions are back-transformed to dollars using `np.clip(pred, 0, None) ** 20` before evaluation so that metrics are directly comparable with Model A.
+
+=== CELL 33 id=c10a767a ===
+#### Model B: 5-Fold Cross-Validation
+
+The same 5-fold setup is applied to Model B. R2 scores are computed on the power-transformed scale inside each fold. A consistently high and stable R2 across folds confirms the transformation makes the model more reliable across different data subsets.
+
+=== CELL 36 id=8116320a ===
+**Insight:** Model B should show a higher and more stable CV R2 than Model A because the power transformation reduces the dominance of extreme cost values during training. The scatter plot should show predictions more evenly distributed around the perfect-prediction line compared to Model A.
+
+=== CELL 37 id=5337b964 ===
+#### Model A vs Model B: Comparison
+
+The next cell summarises both models side by side. The cross-validation R2 is the deciding metric because it averages across five independent splits and is more reliable than any single validation score.
+
+=== CELL 39 id=4134b93b ===
+**Insight:** The CV R2 is the primary criterion, not the single-split validation R2. A model that scores well on one split but varies widely across folds is unstable and not trustworthy. The model with consistently higher CV R2 across all five folds is selected for hyperparameter tuning.
+
+=== CELL 40 id=28d8ea1c ===
+### Phase 3: Hyperparameter Tuning with GridSearchCV
+
+This phase searches for the best regularisation strength for Ridge and Lasso regression. Ridge (L2 penalty) penalises large coefficients and prevents overfitting without removing features. Lasso (L1 penalty) can shrink some coefficients to zero, which is a form of automatic feature selection. GridSearchCV evaluates each alpha value with 5-fold cross-validation on the training set only. The validation set is not seen during this entire phase.
+
+=== CELL 43 id=023245ab ===
+**Insight:** A flat tuning curve indicates that regularisation strength has little effect on performance, which suggests the model is not overfitting — its limitation is the linearity assumption rather than parameter choice. The best alpha is the one that minimises CV MAE on the training set without the validation set being involved.
+
+=== CELL 44 id=4ad6818d ===
+### Phase 4: Validation on the Held-Out Validation Set
+
+The best Ridge and Lasso configurations from Phase 3 are now evaluated on the validation set for the first time since Phase 2. This confirms whether the chosen parameters generalise beyond the training data. All metrics are computed on the original dollar scale. The model with the lowest validation MAE is selected as the final candidate for Phase 5.
+
+=== CELL 46 id=17115138 ===
+**Insight:** Phase 4 is the first and only time the validation set is used to compare regularised models. The model selected here is chosen based on unseen data, which makes the selection trustworthy. It carries forward to Phase 5 where it faces the truly sealed test set.
+
+=== CELL 47 id=00694e09 ===
+### Phase 5: Final Evaluation on the Unseen Test Set
+
+The selected model is retrained on the combined training and validation data to give it more examples. It is then evaluated exactly once on the test set that has been sealed since Phase 1 and has never influenced any decision. These are the final reported results for Linear Regression. A 5-fold CV stability check confirms the model performs consistently and the test result is not a lucky split.
+
+=== CELL 49 id=09c4d8f0 ===
+**Insight:** The test set result is the most honest measure of performance because the test set was never used for any decision during the pipeline. The CV stability check run alongside confirms the result is consistent and not driven by a lucky split.
+
+=== CELL 50 id=1ea74d99 ===
+### Phase 6: Linear Regression Results Summary
+
+All evaluation results from Phases 2 through 5 are collected below in a single table, all reported on the original dollar scale, showing the progression from the raw baseline through tuning to the final test evaluation.
+
+=== CELL 52 id=f89f572e ===
+**Insight:** A low R2 across all linear models is consistent with the EDA finding that supplier cost is driven by non-linear interactions among tube geometry, component weight, order type, and supplier strategy. This result is a meaningful baseline. The KNN model in the next section uses a fundamentally different approach and will be compared against these numbers in the final comparison.
+
+=== CELL 53 id=aee63b30 ===
+### Explainable AI: Feature Importance
+
+Linear regression is naturally interpretable because each prediction is a weighted sum of the input features. Two methods are used here. Standardised coefficients show the relative contribution of each feature on a comparable scale. SHAP values (SHapley Additive Explanations) provide a theoretically grounded decomposition of each prediction into per-feature contributions, showing both magnitude and direction.
+
+=== CELL 54 id=01dc20ba ===
+#### Standardised Coefficients
+
+Because features are standardised inside the pipeline, the coefficients are on a comparable scale. A larger absolute value means that feature has a stronger influence on the prediction. Blue bars increase the predicted cost and red bars decrease it.
+
+=== CELL 56 id=3d761362 ===
+#### SHAP Values (Global and Local Explanations)
+
+SHAP (SHapley Additive Explanations) is the current standard for explainable AI in machine learning. A `LinearExplainer` is used here because the model is linear. The global bar plot shows average absolute impact per feature across all validation samples. The dot plot adds direction. The waterfall plot explains one individual prediction step by step.
+
+=== CELL 61 id=11c017f1 ===
+**Insight:** The SHAP global bar plot ranks features by average absolute contribution across all validation samples. The dot plot shows direction: features pushing predictions higher appear on the right. The waterfall plot for a single row answers the question of why the model predicted a specific price for that particular tube assembly, starting from the dataset average and showing each feature's push up or down toward the final prediction.
+
+=== CELL 62 id=3c9f85be ===
+## 3. KNN Regression
+
+This section applies K-Nearest Neighbours Regression (KNN) as the second modelling algorithm. KNN is a non-parametric method that makes no assumption about the shape of the relationship between features and the target. Instead of fitting a global equation, it predicts the cost of a new tube assembly by looking at the K most similar assemblies in the training data and averaging their costs. This makes KNN fundamentally different from Linear Regression and a useful comparison. The same data split, evaluation function, and metric scale from the Linear Regression section are reused throughout.
+
+=== CELL 63 id=e7b6cde0 ===
+### Phase 2: KNN Baseline
+
+A baseline KNN model is trained with the default K=5 on the power-transformed cost. `StandardScaler` is applied inside the pipeline because KNN is a distance-based algorithm — without scaling, features measured in large units (such as `annual_usage`) would dominate the distance calculation and overpower smaller features such as `wall` thickness. Predictions are back-transformed to dollars for evaluation using the same `evaluate` function defined earlier.
+
+=== CELL 65 id=bb95dae0 ===
+#### KNN Baseline: 5-Fold Cross-Validation
+
+The same KFold setup from the Linear Regression section is applied here. Cross-validation on the training set with K=5 gives an initial view of KNN's stability before any tuning.
+
+=== CELL 68 id=5eff411c ===
+**Insight:** The baseline KNN with K=5 gives an initial measure of how well a nearest-neighbour approach handles this dataset. Small K values can overfit to local noise in the training data, which is why Phase 3 searches for the optimal K across a wider range. The scatter plot shows whether KNN captures the general trend of increasing cost with larger and heavier assemblies.
+
+=== CELL 69 id=16a7b1ee ===
+### Phase 3: Hyperparameter Tuning — Finding the Best K
+
+The only hyperparameter for KNN is `n_neighbors` (K), the number of nearest neighbours used to compute each prediction. A small K makes the model sensitive to individual training points (high variance). A large K smooths over local patterns and risks underfitting (high bias). GridSearchCV with 5-fold cross-validation is used to find the K that minimises CV MAE on the training set. The validation set remains sealed during this entire phase.
+
+=== CELL 72 id=c956705a ===
+**Insight:** The tuning curve shows how CV MAE changes as K increases. Very small K values typically produce higher error due to overfitting to local noise. As K increases, the model smooths out and error decreases until it reaches a minimum, after which adding more neighbours starts to underfit. The best K is the value at the lowest point of the curve.
+
+=== CELL 73 id=8fffb349 ===
+### Phase 4: Validation of the Best K on the Held-Out Validation Set
+
+The best K found in Phase 3 is now applied to the validation set for the first time. This confirms whether the chosen K generalises beyond the training data. All metrics are on the original dollar scale for a direct comparison with the Linear Regression results from Phase 4 of the previous section.
+
+=== CELL 75 id=5aa8804e ===
+**Insight:** Comparing the best tuned K against the baseline K=5 on the validation set shows whether tuning made a meaningful difference. The validation result here is also the first opportunity to compare KNN directly against the Linear Regression models from Phase 4 of the previous section, though the formal side-by-side comparison is reserved for Section 4.
+
+=== CELL 76 id=eb43180a ===
+### Phase 5: Final Evaluation on the Unseen Test Set
+
+The best KNN model is retrained on the combined training and validation data. It is then evaluated exactly once on the sealed test set. These are the final reported results for KNN Regression. A CV stability check confirms the model is consistent and the test result is not a lucky split.
+
+=== CELL 78 id=bad73630 ===
+**Insight:** The test set result for KNN, like that of Linear Regression, is evaluated exactly once after the pipeline is complete. Comparing the CV mean and standard deviation with the test score shows whether the model is stable or whether it performs differently on the final held-out data.
+
+=== CELL 79 id=3c01e8db ===
+### Phase 6: KNN Results Summary
+
+=== CELL 81 id=859cf4cb ===
+**Insight:** The KNN summary shows how performance changed from the untuned baseline to the best K found by GridSearchCV, and finally to the result on the unseen test set. A reduction in MAE from baseline to best K confirms that tuning made a meaningful improvement.
+
+=== CELL 82 id=ba1a77b9 ===
+## 4. Final Model Comparison: Linear Regression vs KNN
+
+Both models have now been trained, tuned, and evaluated on the same unseen test set using the same feature set, transformation, and evaluation function. This section brings the final results together to identify the stronger model and explain what the comparison reveals about the nature of the supplier pricing prediction problem.
+
+=== CELL 84 id=0ce47304 ===
+**Insight:** The comparison reveals which approach — a global linear model or a local distance-based model — better captures the pricing patterns in the Caterpillar tube assembly dataset. Linear Regression assumes a straight-line relationship between features and cost, which may miss non-linear patterns. KNN makes no such assumption and can capture local pricing clusters, but it is sensitive to the choice of K and to noisy features. The model with the lower test MAE is the recommended choice for deployment, but both results together demonstrate that supplier pricing prediction benefits from further exploration with non-linear methods such as gradient boosting or random forests.
+

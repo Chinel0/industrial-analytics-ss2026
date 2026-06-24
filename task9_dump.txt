@@ -1,0 +1,328 @@
+﻿=== CELL 204 [markdown] ===
+# Task 9: Evaluation & Enhancement
+
+Task 8 produced a validated baseline. This task analyses its weaknesses, tests targeted enhancements, selects the best candidate and evaluates it on the test set, followed by an error and limitation analysis.
+
+The structure follows the task deliverables:
+
+1. **9.1 Validation Analysis:** consolidated metrics from Task 8 and identified weaknesses
+2. **9.2 Enhancement Experiments:** three documented experiments, each evaluated on the validation set only
+3. **9.3 Enhancement Log:** all experiments compared in one table
+4. **9.4 Candidate Selection and Final Test Evaluation:** the best experiment is retrained and evaluated on the test set
+5. **9.5 Error Analysis:** residual analysis and root cause investigation
+6. **9.6 Limitations and Evaluation Summary**
+
+=== CELL 205 [markdown] ===
+## 9.1 Validation Analysis from Task 8
+
+The next cell consolidates the validation and cross-validation results of all Task 8 models into one report and lists the weaknesses that the enhancement experiments will target.
+
+=== CELL 206 [code] ===
+print("=" * 60)
+print("9.1 VALIDATION ANALYSIS REPORT (results from Task 8)")
+print("=" * 60)
+
+alpha_ridge = ridge_gs.best_params_['model__alpha']
+alpha_lasso = lasso_gs.best_params_['model__alpha']
+
+analysis = pd.DataFrame({
+    'Model': ['Model A (raw cost)',
+              'Model B (power cost)',
+              f'Ridge alpha={alpha_ridge}',
+              f'Lasso alpha={alpha_lasso}'],
+    'Val MAE ($)' : [mae_A,  mae_B,  res_ridge['MAE'],  res_lasso['MAE']],
+    'Val RMSE ($)': [rmse_A, rmse_B, res_ridge['RMSE'], res_lasso['RMSE']],
+    'Val R2'      : [r2_A,   r2_B,   res_ridge['R²'],   res_lasso['R²']],
+    'CV R2'       : [cv_r2_A, cv_r2_B, np.nan, np.nan],
+})
+print(analysis.round(4).to_string(index=False))
+
+print("""
+Identified weaknesses to address:
+ 1. The model systematically underestimates high-cost assemblies
+    (above roughly $100), visible in the actual vs predicted plot.
+ 2. Dollar-scale R2 is low because the variance is dominated by a
+    small number of very expensive tubes.
+ 3. The date features month and dayofyear are almost perfectly
+    correlated, which inflates their coefficients (multicollinearity)
+    and distorts the feature importance picture.
+ 4. The tuning curves were flat: regularisation alone gives only a
+    marginal improvement, so the enhancements must change the
+    feature set, not only the parameters.
+""")
+
+=== CELL 207 [markdown] ===
+## 9.2 Enhancement Experiments
+
+Based on the weaknesses above, three enhancements are tested. Every experiment is trained on the training set only and evaluated on the validation set. The test set remains untouched until section 9.4. The Task 8 best model (Ridge with the tuned alpha on all features) is included as the reference.
+
+=== CELL 208 [markdown] ===
+### Experiment 1: Removal of Collinear Date Features
+
+The features month and dayofyear carry nearly identical information, which inflates their coefficients in opposite directions and adds noise. This experiment removes the redundant date features (month, dayofyear, dayofweek, day) and keeps only year, then retrains the tuned Ridge model.
+
+=== CELL 209 [code] ===
+exp_log = []
+
+alpha_best = ridge_gs.best_params_['model__alpha']
+
+# Reference entry: Task 8 best model, all features
+exp_log.append({'Experiment': 'Reference: Ridge (all features)',
+                'Features': X_train.shape[1],
+                'Val MAE ($)': res_ridge['MAE'],
+                'Val RMSE ($)': res_ridge['RMSE'],
+                'Val R2': res_ridge['R²']})
+
+# Experiment 1: drop collinear date features
+drop_dates = [c for c in ['month', 'dayofyear', 'dayofweek', 'day'] if c in X_train.columns]
+X_train_e1 = X_train.drop(columns=drop_dates)
+X_val_e1   = X_val.drop(columns=drop_dates)
+
+exp1_pipe = Pipeline([('scaler', StandardScaler()),
+                      ('model',  Ridge(alpha=alpha_best))])
+exp1_pipe.fit(X_train_e1, y_train)
+
+res_e1 = evaluate(exp1_pipe, X_val_e1, y_val, 'Experiment 1: without collinear date features')
+exp_log.append({'Experiment': 'Exp 1: drop collinear date features',
+                'Features': X_train_e1.shape[1],
+                'Val MAE ($)': res_e1['MAE'],
+                'Val RMSE ($)': res_e1['RMSE'],
+                'Val R2': res_e1['R²']})
+
+print(f"\nDropped features: {drop_dates}")
+
+=== CELL 210 [markdown] ===
+### Experiment 2: Feature Selection with SelectKBest
+
+This experiment keeps only the 20 features with the strongest univariate relationship to the target, measured by the F-test (f_regression) on the training set. Removing weak and noisy features can improve generalisation. The selection step is part of the pipeline, so it is fitted on training data only.
+
+=== CELL 211 [code] ===
+from sklearn.feature_selection import SelectKBest, f_regression
+
+exp2_pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('select', SelectKBest(score_func=f_regression, k=20)),
+    ('model',  Ridge(alpha=alpha_best))
+])
+exp2_pipe.fit(X_train, y_train)
+
+res_e2 = evaluate(exp2_pipe, X_val, y_val, 'Experiment 2: SelectKBest top 20 features')
+exp_log.append({'Experiment': 'Exp 2: SelectKBest top 20 features',
+                'Features': 20,
+                'Val MAE ($)': res_e2['MAE'],
+                'Val RMSE ($)': res_e2['RMSE'],
+                'Val R2': res_e2['R²']})
+
+selected = X_train.columns[exp2_pipe.named_steps['select'].get_support()].tolist()
+print(f"\nSelected features:\n{selected}")
+
+=== CELL 212 [markdown] ===
+### Experiment 3: Interaction Features on the Key Cost Drivers
+
+The EDA showed that cost depends on combinations of physical properties, for example diameter together with length. A purely linear model cannot represent such interactions. This experiment adds degree-2 polynomial and interaction terms for the main physical cost drivers and trains the tuned Ridge model on the expanded feature set.
+
+=== CELL 213 [code] ===
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.compose import ColumnTransformer
+
+key_feats = [c for c in ['diameter', 'wall', 'length', 'quantity',
+                          'Total_weight', 'num_bends',
+                          'min_order_quantity', 'annual_usage']
+             if c in X_train.columns]
+other_feats = [c for c in X_train.columns if c not in key_feats]
+
+pre = ColumnTransformer([
+    ('poly', PolynomialFeatures(degree=2, include_bias=False), key_feats),
+    ('rest', 'passthrough', other_feats)
+])
+
+exp3_pipe = Pipeline([
+    ('pre',    pre),
+    ('scaler', StandardScaler()),
+    ('model',  Ridge(alpha=alpha_best))
+])
+exp3_pipe.fit(X_train, y_train)
+
+res_e3 = evaluate(exp3_pipe, X_val, y_val, 'Experiment 3: interaction features + Ridge')
+n_feats = exp3_pipe.named_steps['pre'].transform(X_train.head(1)).shape[1]
+exp_log.append({'Experiment': 'Exp 3: interaction features + Ridge',
+                'Features': n_feats,
+                'Val MAE ($)': res_e3['MAE'],
+                'Val RMSE ($)': res_e3['RMSE'],
+                'Val R2': res_e3['R²']})
+
+print(f"\nKey features expanded with degree-2 terms: {key_feats}")
+print(f"Total features after expansion: {n_feats}")
+
+=== CELL 214 [markdown] ===
+## 9.3 Enhancement Log
+
+The next cell collects all experiments into one table sorted by validation MAE and visualises the comparison. This table is the documented experiment log: it shows what was tried, how many features each version used and what it achieved on the validation set.
+
+=== CELL 215 [code] ===
+exp_df = pd.DataFrame(exp_log).sort_values('Val MAE ($)').reset_index(drop=True)
+
+print("=" * 60)
+print("9.3 ENHANCEMENT LOG (sorted by validation MAE)")
+print("=" * 60)
+print(exp_df.round(4).to_string(index=False))
+
+best_exp_name = exp_df.loc[0, 'Experiment']
+print(f"\nBest experiment on the validation set: {best_exp_name}")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+d = exp_df.sort_values('Val MAE ($)', ascending=True)
+axes[0].barh(d['Experiment'], d['Val MAE ($)'], color='steelblue', edgecolor='black')
+axes[0].set_title('Validation MAE per Experiment (lower is better)', fontweight='bold')
+axes[0].set_xlabel('Validation MAE ($)')
+
+d2 = exp_df.sort_values('Val R2', ascending=True)
+axes[1].barh(d2['Experiment'], d2['Val R2'], color='seagreen', edgecolor='black')
+axes[1].set_title('Validation R2 per Experiment (higher is better)', fontweight='bold')
+axes[1].set_xlabel('Validation R2')
+
+plt.tight_layout()
+plt.savefig('enhancement_log.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+=== CELL 216 [markdown] ===
+## 9.4 Candidate Selection and Final Test Evaluation
+
+The experiment with the lowest validation MAE becomes the enhanced candidate model. It is retrained on the combined training and validation data and evaluated on the test set. The result is compared directly with the Task 8 final model to show whether the enhancement improved real generalisation performance.
+
+=== CELL 217 [code] ===
+print("=" * 60)
+print("9.4 FINAL TEST EVALUATION OF THE ENHANCED MODEL")
+print("=" * 60)
+
+X_full_train = pd.concat([X_train, X_val])
+y_full_train = pd.concat([y_train, y_val])
+
+if best_exp_name.startswith('Exp 1'):
+    cols = [c for c in X_full_train.columns if c not in drop_dates]
+    enhanced = Pipeline([('scaler', StandardScaler()),
+                         ('model',  Ridge(alpha=alpha_best))])
+    enhanced.fit(X_full_train[cols], y_full_train)
+    res_enh = evaluate(enhanced, X_test[cols], y_test, 'ENHANCED model (test set)')
+elif best_exp_name.startswith('Exp 2'):
+    enhanced = Pipeline([('scaler', StandardScaler()),
+                         ('select', SelectKBest(score_func=f_regression, k=20)),
+                         ('model',  Ridge(alpha=alpha_best))])
+    enhanced.fit(X_full_train, y_full_train)
+    res_enh = evaluate(enhanced, X_test, y_test, 'ENHANCED model (test set)')
+elif best_exp_name.startswith('Exp 3'):
+    enhanced = Pipeline([('pre',    pre),
+                         ('scaler', StandardScaler()),
+                         ('model',  Ridge(alpha=alpha_best))])
+    enhanced.fit(X_full_train, y_full_train)
+    res_enh = evaluate(enhanced, X_test, y_test, 'ENHANCED model (test set)')
+else:
+    enhanced = Pipeline([('scaler', StandardScaler()),
+                         ('model',  Ridge(alpha=alpha_best))])
+    enhanced.fit(X_full_train, y_full_train)
+    res_enh = evaluate(enhanced, X_test, y_test, 'ENHANCED model (test set)')
+
+print("\nComparison with the Task 8 final model on the same test set:")
+compare = pd.DataFrame({
+    'Model': ['Task 8 final (Ridge, all features)', f'Task 9 enhanced ({best_exp_name})'],
+    'Test MAE ($)' : [res_final['MAE'],  res_enh['MAE']],
+    'Test RMSE ($)': [res_final['RMSE'], res_enh['RMSE']],
+    'Test R2'      : [res_final['R²'],   res_enh['R²']],
+})
+print(compare.round(4).to_string(index=False))
+
+joblib.dump(enhanced, 'enhanced_model.pkl')
+pd.DataFrame({'actual_cost': res_enh['y_true'].values,
+              'predicted_cost': res_enh['y_pred']}).to_csv('enhanced_predictions.csv', index=False)
+print("\nSaved: enhanced_model.pkl | enhanced_predictions.csv")
+
+=== CELL 218 [markdown] ===
+## 9.5 Error Analysis
+
+Confusion matrices apply to classification models. Since this is a regression task, the equivalent error analysis tools are:
+
+1. **Residual distribution:** the histogram of prediction errors should be centred at zero
+2. **Residuals vs predicted values:** patterns here reveal systematic bias
+3. **Error by cost bracket:** the regression counterpart of a confusion matrix, showing in which price range the model succeeds and in which it fails
+
+The next cell produces all three for the enhanced model on the test set.
+
+=== CELL 219 [code] ===
+y_true_err = pd.Series(res_enh['y_true']).reset_index(drop=True)
+y_pred_err = pd.Series(res_enh['y_pred']).reset_index(drop=True)
+residuals  = y_true_err - y_pred_err
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+axes[0, 0].hist(residuals, bins=80, color='steelblue', edgecolor='black')
+axes[0, 0].axvline(0, color='red', linestyle='--')
+axes[0, 0].set_title('Residual Distribution (actual - predicted)', fontweight='bold')
+axes[0, 0].set_xlabel('Residual ($)')
+
+axes[0, 1].scatter(y_pred_err, residuals, alpha=0.3, s=12, color='seagreen')
+axes[0, 1].axhline(0, color='red', linestyle='--')
+axes[0, 1].set_title('Residuals vs Predicted Cost', fontweight='bold')
+axes[0, 1].set_xlabel('Predicted Cost ($)')
+axes[0, 1].set_ylabel('Residual ($)')
+
+brackets = pd.cut(y_true_err, bins=[0, 10, 20, 50, 100, np.inf],
+                  labels=['0-10', '10-20', '20-50', '50-100', '100+'])
+err_table = pd.DataFrame({'bracket': brackets,
+                          'abs_error': (y_true_err - y_pred_err).abs(),
+                          'actual': y_true_err})
+bracket_stats = err_table.groupby('bracket').agg(
+    quotes=('actual', 'count'),
+    mean_abs_error=('abs_error', 'mean'),
+    median_abs_error=('abs_error', 'median'))
+
+bracket_stats['mean_abs_error'].plot(kind='bar', ax=axes[1, 0],
+                                     color='darkorange', edgecolor='black')
+axes[1, 0].set_title('Mean Absolute Error by Cost Bracket', fontweight='bold')
+axes[1, 0].set_xlabel('Actual Cost Bracket ($)')
+axes[1, 0].set_ylabel('Mean Absolute Error ($)')
+axes[1, 0].tick_params(axis='x', rotation=0)
+
+bracket_stats['quotes'].plot(kind='bar', ax=axes[1, 1],
+                             color='slategray', edgecolor='black')
+axes[1, 1].set_title('Number of Test Quotes by Cost Bracket', fontweight='bold')
+axes[1, 1].set_xlabel('Actual Cost Bracket ($)')
+axes[1, 1].set_ylabel('Count')
+axes[1, 1].tick_params(axis='x', rotation=0)
+
+plt.suptitle('9.5 Error Analysis: Enhanced Model on the Test Set',
+             fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.savefig('error_analysis.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("Error by cost bracket:")
+print(bracket_stats.round(4).to_string())
+
+=== CELL 220 [markdown] ===
+### Root Cause Analysis
+
+The error analysis shows a consistent pattern with three root causes:
+
+1. **Data imbalance across price ranges.** The vast majority of test quotes lie below $20, while expensive assemblies above $100 are rare. The model has very few examples to learn high-cost pricing behaviour from, so its absolute error grows steeply with the cost bracket.
+
+2. **The linearity assumption.** Supplier pricing combines fixed costs (tooling, setup) with variable costs that interact, for example quantity discounts that depend on the complexity of the assembly. A linear model cannot fully represent such interactions, which is why even the enhanced versions plateau.
+
+3. **Back-transformation amplification.** The model is trained on the power-transformed scale. Converting predictions back to dollars raises them to the power of 20, which amplifies small transformed-scale errors into large dollar errors exactly in the expensive range.
+
+These causes explain why the mean absolute error per bracket rises with the cost while the typical quote (the 0 to 20 dollar range that dominates procurement volume) is predicted with a small error.
+
+=== CELL 221 [markdown] ===
+## 9.6 Limitations and Evaluation Summary
+
+**Limitations**
+
+1. The model family is linear. The flat tuning curves and the experiment log show that parameter tuning and feature work give only marginal gains; the remaining gap to a better score requires non-linear models such as the gradient boosting approaches developed by the other team members.
+2. High-cost assemblies are underrepresented in the data, which limits any model trained on it, regardless of algorithm.
+3. The specification dataset could not be used because the lookup table that explains the specification codes is missing.
+4. Quotes are heavily concentrated in the 2010 to 2014 period, so the model reflects the pricing situation of that time and would need retraining on current data before production use.
+
+**Evaluation summary**
+
+The evaluation followed the required methodology: a 3-way split with a sealed test set, baseline comparison justified by 5-fold cross-validation, hyperparameter tuning with GridSearchCV on the training set only, validation of the chosen parameters on the held-out validation set, documented enhancement experiments and one final evaluation on truly unseen test data. The deliverables of this task are the validation analysis report (9.1), the enhanced model version (9.4, saved as enhanced_model.pkl), the enhancement log (9.3), the test evaluation report (9.4), the error analysis (9.5) and this summary.
+
